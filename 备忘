@@ -1,0 +1,21 @@
+kubectl delete pod dz-web-dcdd44bcb-ggwn7 --grace-period=0 --force   #删除处于 Terminating的pod,pod被删除后根据deployments重启
+kubectl delete pod $(kubectl get pods | grep -v NAME | awk '{print $1}') --grace-period=0 --force  #删除所有的pod并重启
+kubectl get pods | grep Evicted | awk '{print $1}' | xargs kubectl delete pod   #删除节点状态为Evicted状态的容器，被k8s驱赶的节点pod
+kubectl patch node nodeIP -p '{"spec":{"unschedulable":true}}'  #将k8s node变为不可用状态
+kubectl patch node nodeIP -p '{"spec":{"unschedulable":false}}'   #将k8s node变为可用状态
+
+kubectl get pods | grep -v Running  #获取异常容器
+
+滚动更新与回滚：
+ kubectl scale deployments/kubernetes-bootcamp --replicas=3
+  kubectl set image  deployment/kubernetes-bootcamp kubernetes-bootcamp=docker.io/jocatalin/kubernetes-bootcamp:v2   #更新镜像
+  kubectl rollout undo deployment kubernetes-bootcamp   #回滚至上次操作
+
+查看日志操作:
+[root@k8s-master1 ~]# kubectl get pods
+NAME                                  READY   STATUS    RESTARTS   AGE
+dz-mysql-6cf68fb589-q6nvx             1/1     Running   0          4m52s
+dz-web-dcdd44bcb-2dm5z                1/1     Running   0          4m52s
+kubernetes-bootcamp-f7b9ccdcf-dld8f   1/1     Running   0          4m52s
+nginx-755464dd6c-bz7s5                1/1     Running   0          4m52s    
+[root@k8s-master1 ~]# kubectl logs -f dz-mysql-6cf68fb589-q6nvx
