@@ -1,0 +1,98 @@
+node("docker") {
+  def branch = env.BRANCH_NAME
+  def isStable = branch.endsWith('stable')
+  def isDevelop = (branch == 'develop' || branch == 'master' || branch=='hotfix')
+  def isTemp = branch.endsWith('build_temp')
+  def isMulti = branch == 'sass_support'
+  if (isDevelop || isStable || isTemp || isMulti) {
+    stage("Pull") {
+      currentBuild.result='SUCCESS'
+      checkout scm
+    }
+
+    stage("Unit") {
+        try {
+            timeout(time: 6) {
+                sh "docker-compose run --rm unit"
+            }
+        } catch (error) {
+            currentBuild.result = 'FAILURE'
+            notifydingding("Unit Test Error", branch, error, env.BUILD_URL, env.ADMIN_DINGDING_LINK)
+            throw error
+        } finally {
+            junit 'reports/junit.xml'
+            step([$class: 'CoberturaPublisher', coberturaReportFile: 'reports/coverage.xml', sourceEncoding: 'ASCII'])
+        }
+    }
+
+    stage("Build") {
+        if (isStable) {
+            if (branch.startsWith('develop')) {
+                env.Version = "v2-admin-develop"
+            } else if (branch.startsWith('master')) {
+                env.Version = "v2-admin-master"
+            }
+        } else if (isTemp) {
+            env.Version = "v3-admin-develop"
+        } else if (isMulti) {
+            env.Version = "v3sass-admin-develop"
+        }else {
+            env.Version = "v3-admin-$branch"
+        }
+        sh "docker-compose build base_admin_app"
+        sh "docker-compose build admin_app"
+        sh 'docker-compose build admin_celery-worker'
+        sh 'docker-compose build admin_celery-beat'
+    }
+
+withEnv(["REGISTRY_NAME=registry.ddapp.com/dingdone/${env.Version}_app",
+         "CELERY_BEAT_NAME=registry.ddapp.com/dingdone/${env.Version}_celery_beat",
+         "CELERY_WORKER_NAME=registry.ddapp.com/dingdone/${env.Version}_celery_worker",
+         "BUILD_VERSION=2.${env.BUILD_NUMBER}",]) {
+    stage("Staging") {
+        try {
+            sh "docker-compose up -d staging-dep"
+            sh "docker-compose run --rm staging"
+        } catch (error) {
+            currentBuild.result = 'FAILURE'
+            notifydingding("Stageing Test Error", branch, error, env.BUILD_URL, env.ADMIN_DINGDING_LINK)
+            throw error
+        } finally {
+            sh "docker-compose down"
+        }
+    }
+
+
+withDockerRegistry([credentialsId: 'registry', url: 'https://registry.ddapp.com']) {
+    stage("Publish") {
+       // admin app
+       sh "docker tag admin_app ${env.REGISTRY_NAME}:${env.BUILD_VERSION}"
+       sh "docker push ${env.REGISTRY_NAME}:${env.BUILD_VERSION}"
+       // admin celery worker
+       sh "docker tag admin_dingdone_celery_worker ${env.CELERY_WORKER_NAME}:${env.BUILD_VERSION}"
+       sh "docker push ${env.CELERY_WORKER_NAME}:${env.BUILD_VERSION}"
+       // admin celery beat
+       sh "docker tag admin_dingdone_celery_beat ${env.CELERY_BEAT_NAME}:${env.BUILD_VERSION}"
+       sh "docker push ${env.CELERY_BEAT_NAME}:${env.BUILD_VERSION}"
+    }
+}
+
+    stage("Product") {
+        sh "ssh ${env.PROD_SSH} \"python ${env.DEPLOY_PYTHON_LOC} --images ${env.Version} ${env.BUILD_VERSION}\""
+        sh "ssh ${env.PROD_SSH} \"docker service update --image=${env.REGISTRY_NAME}:${env.BUILD_VERSION} ${env.Version}_app\""
+        sh "ssh ${env.PROD_SSH} \"docker service update --image=${env.CELERY_WORKER_NAME}:${env.BUILD_VERSION} ${env.Version}_celery_worker\""
+        sh "ssh ${env.PROD_SSH} \"docker service update --image=${env.CElERY_BEAT_NAME}:${env.BUILD_VERSION} ${env.Version}_celery_beat\""
+        notifydingding("Success", branch, 'deployed success!', env.BUILD_URL, env.ADMIN_DINGDING_LINK)
+        echo "已成功部署"
+    }
+  }
+}
+}
+
+def notifydingding(status, branch, msg, link, dinding_link) {
+    def gitmsg = sh(returnStdout: true, script: 'git log -1 --format=%B').trim()
+    def time = sh(returnStdout: true, script: 'git log -1 --format=%cd').trim()
+    def user = sh(returnStdout: true, script: 'git log -1 --format=%ae').trim()
+    def data = ["msgtype": "markdown", "markdown": ["title": "admin:$branch","text":"### **版本:dingdone-srv-admin** \n > 当前状态：$status \n\n > 分支:$branch \n\n > 提交信息: $gitmsg \n\n > 提交时间: $time \n\n > 提交用户: $user \n\n - 构建信息：$msg \n      ##### [Jenkins构建地址]($link)"]]
+    httpRequest acceptType: 'APPLICATION_JSON_UTF8', contentType: 'APPLICATION_JSON_UTF8', httpMode: 'POST', requestBody: groovy.json.JsonOutput.toJson(data), responseHandle: 'NONE', url: dinding_link
+ }
